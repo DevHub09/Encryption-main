@@ -31,10 +31,13 @@ const Header = () => {
     alert("Logout Successfully");
   };
   return (
-    <AppBar position="fixed" style={{ backgroundColor: "#ff8fab" ,padding:"0 60px"}}>
+    <AppBar
+      position="fixed"
+      style={{ backgroundColor: "#ff8fab", padding: "0 60px" }}
+    >
       <Toolbar>
         <div style={{ flexGrow: 1, display: "flex", alignItems: "center" }}>
-          <div style={{ marginRight: "20px"}}>
+          <div style={{ marginRight: "20px" }}>
             <Typography
               variant="h6"
               color="inherit"
@@ -84,10 +87,30 @@ const Header = () => {
           <div style={{ marginRight: "20px" }}>
             <Typography variant="h6" color="inherit" noWrap>
               <NavLink
-                to="/encrypt"
+                to="/aes"
                 style={{ textDecoration: "none", color: "black" }}
               >
-                Encryption
+                AES
+              </NavLink>
+            </Typography>
+          </div>
+          <div style={{ marginRight: "20px" }}>
+            <Typography variant="h6" color="inherit" noWrap>
+              <NavLink
+                to="/rsa"
+                style={{ textDecoration: "none", color: "black" }}
+              >
+                RSA
+              </NavLink>
+            </Typography>
+          </div>
+          <div style={{ marginRight: "20px" }}>
+            <Typography variant="h6" color="inherit" noWrap>
+              <NavLink
+                to="/des"
+                style={{ textDecoration: "none", color: "black" }}
+              >
+                DES
               </NavLink>
             </Typography>
           </div>

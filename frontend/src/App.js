@@ -13,6 +13,8 @@ import Product from "./pages/admin/Product";
 import UpdateProduct from "./pages/admin/UpdateProduct";
 import Category from "./pages/layout/Category";
 import Encrypt from "./pages/layout/Encrypt";
+import Des from "./pages/layout/Des";
+import Rsa from "./pages/layout/Rsa";
 
 const App = () => {
   return (
@@ -21,8 +23,9 @@ const App = () => {
         <Routes>
           <Route path="/" element={<Home />} />
           {/* <Route path="/category" element={<Category />} /> */}
-          <Route path="/encrypt" element={<Encrypt />} />
-
+          <Route path="/aes" element={<Encrypt />} />
+          <Route path="/des" element={<Des />} />
+          <Route path="/rsa" element={<Rsa />} />
 
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
