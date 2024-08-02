@@ -15,7 +15,7 @@ import Category from "./pages/layout/Category";
 import Encrypt from "./pages/layout/Encrypt";
 import Des from "./pages/layout/Des";
 import Rsa from "./pages/layout/Rsa";
-import Test from "./components/Test";
+import Python from "./components/Python";
 
 const App = () => {
   return (
@@ -31,7 +31,7 @@ const App = () => {
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
           <Route path="/forget-password" element={<ForgetPassword />} />
-          <Route path="/test" element={<Test />} />
+          <Route path="/python" element={<Python />} />
 
           {/* Admin Routes */}
           <Route path="/dashboard" element={<AdminRoute />}>

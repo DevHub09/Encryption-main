@@ -107,10 +107,10 @@ const Header = () => {
           <div style={{ marginRight: "20px" }}>
             <Typography variant="h6" color="inherit" noWrap>
               <NavLink
-                to="/test"
+                to="/python"
                 style={{ textDecoration: "none", color: "black" }}
               >
-                Test
+                Python
               </NavLink>
             </Typography>
           </div>
