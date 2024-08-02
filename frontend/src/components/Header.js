@@ -107,6 +107,16 @@ const Header = () => {
           <div style={{ marginRight: "20px" }}>
             <Typography variant="h6" color="inherit" noWrap>
               <NavLink
+                to="/test"
+                style={{ textDecoration: "none", color: "black" }}
+              >
+                Test
+              </NavLink>
+            </Typography>
+          </div>
+          <div style={{ marginRight: "20px" }}>
+            <Typography variant="h6" color="inherit" noWrap>
+              <NavLink
                 to="/des"
                 style={{ textDecoration: "none", color: "black" }}
               >
