@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Scan Results</title>
+</head>
+<body>
+    <h1>Scan Results</h1>
+    <table border="1">
+        <thead>
+            <tr>
+                <th>Vulnerability</th>
+                <th>Status</th>
+                <th>Severity</th>
+                <th>Recommendation</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for vulnerability, (status, severity, recommendation) in results.items() %}
+                <tr>
+                    <td>{{ vulnerability }}</td>
+                    <td>{{ status }}</td>
+                    <td>{{ severity }}</td>
+                    <td>{{ recommendation }}</td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    <a href="{{ url_for('download_file', filename=pdf_file) }}" download>Download PDF Report</a>
+</body>
+</html>

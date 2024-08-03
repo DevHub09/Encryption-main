@@ -1,469 +1,393 @@
-from flask import Flask, request, render_template_string, jsonify
+from flask import Flask, request, render_template, send_file
+from fpdf import FPDF
 import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse, urlencode
 import socket
-import time
+from urllib.parse import urlparse
+import re
+import dns.resolver
 
 app = Flask(__name__)
 
-# URL ko validate karne ka function
-def validate_url(url):
-    try:
-        parsed_url = urlparse(url)
-        if not parsed_url.scheme:
-            url = "http://" + url
-            parsed_url = urlparse(url)
-        # Check karne ke liye ek simple request send karte hain ke URL reachable hai ya nahi
-        requests.get(url, timeout=5)
-        return url
-    except requests.exceptions.RequestException as e:
-        return None
+# Hardcoded lists for demonstration purposes
+PHISHING_DOMAINS = ["phishingsite.com", "fakebank.com"]
+WEAK_PASSWORDS = ["123456", "password", "123456789", "qwerty", "abc123", "password1"]
+MALWARE_SIGNATURES = ["trojan", "ransomware", "virus", "malware", "exploit", "backdoor", "shell", "cryptominer"]
+TROJAN_INDICATORS = ["trojan", "backdoor", "malicious", "suspicious"]
+SPYWARE_INDICATORS = ["spyware", "track", "monitor", "keylogger", "logger"]
+CODE_INJECTION_PATTERNS = ["exec(", "eval(", "system(", "shell_exec(", "passthru(", "popen(", "proc_open(", "assert(", "include(", "require("]
+URL_MANIPULATION_PATTERNS = ["id=", "user=", "name=", "value=", "redirect=", "lang=", "page="]
+XXE_PAYLOADS = [
+    '<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>',
+    '<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://example.com/malicious.dtd">]><foo>&xxe;</foo>'
+]
+VIRUS_SIGNATURES = ["malware", "virus", "ransomware", "trojan", "worm", "exploit"]
 
-# SQL Injection vulnerability detect karne ka function
-def detect_sql_injection(url):
-    sql_payloads = ["'", "' OR '1'='1", '" OR "1"="1"']
-    results = []
-    for payload in sql_payloads:
-        payload_url = urljoin(url, f"?payload={urlencode({'payload': payload})}")
+def get_domain_from_url(url):
+    parsed_url = urlparse(url)
+    return parsed_url.netloc
+
+def check_open_redirect(url):
+    try:
+        response = requests.get(url, allow_redirects=True)
+        return len(response.history) > 1
+    except Exception as e:
+        print(f"Error checking open redirect: {e}")
+        return False
+
+def check_security_headers(url):
+    try:
+        response = requests.get(url)
+        headers = response.headers
+        required_headers = [
+            "Content-Security-Policy",
+            "Strict-Transport-Security",
+            "X-Content-Type-Options",
+            "X-Frame-Options",
+            "X-XSS-Protection"
+        ]
+        missing_headers = [header for header in required_headers if header not in headers]
+        return len(missing_headers) == 0
+    except Exception as e:
+        print(f"Error checking security headers: {e}")
+        return False
+
+def check_sql_injection(url):
+    test_payloads = ["' OR '1'='1", '" OR "1"="1', "' OR '1'='1' --", '" OR 1=1 --']
+    for payload in test_payloads:
         try:
-            r = requests.get(payload_url, timeout=5)
-            if "syntax" in r.text.lower() or "mysql" in r.text.lower() or "sql" in r.text.lower():
-                results.append(f"[!] SQL Injection vulnerability detected at {url}")
-        except requests.exceptions.RequestException as e:
-            results.append(f"[-] Error during SQL Injection test at {url}: {e}")
-    return results
+            response = requests.get(url + payload)
+            if "SQL syntax" in response.text or "error" in response.text.lower():
+                return True
+        except Exception as e:
+            print(f"Error checking SQL Injection: {e}")
+    return False
 
-# XSS vulnerability detect karne ka function
-def detect_xss(url):
-    xss_payload = "<script>alert('XSS')</script>"
-    results = []
-    try:
-        r = requests.get(url, params={"q": xss_payload}, timeout=5)
-        if xss_payload in r.text:
-            results.append(f"[!] XSS vulnerability detected at {url}")
-    except requests.exceptions.RequestException as e:
-        results.append(f"[-] Error during XSS test at {url}: {e}")
-    return results
+def brute_force_login(url, usernames, passwords):
+    for username in usernames:
+        for password in passwords:
+            data = {
+                'username': username,
+                'password': password
+            }
+            try:
+                response = requests.post(url, data=data)
+                if "incorrect" not in response.text.lower():
+                    return True, username, password
+            except Exception as e:
+                print(f"Error during brute force attack: {e}")
+    return False, None, None
 
-# Open Redirect vulnerability detect karne ka function
-def detect_open_redirect(url):
-    redirect_payloads = ["http://evil.com", "//evil.com"]
-    results = []
-    for payload in redirect_payloads:
-        payload_url = urljoin(url, f"?next={urlencode({'next': payload})}")
-        try:
-            r = requests.get(payload_url, timeout=5, allow_redirects=False)
-            if r.status_code in [301, 302] and "Location" in r.headers and payload in r.headers["Location"]:
-                results.append(f"[!] Open Redirect vulnerability detected at {url}")
-        except requests.exceptions.RequestException as e:
-            results.append(f"[-] Error during Open Redirect test at {url}: {e}")
-    return results
-
-# Clickjacking vulnerability detect karne ka function
-def detect_clickjacking(url):
-    results = []
-    try:
-        r = requests.get(url, timeout=5)
-        if "X-Frame-Options" not in r.headers:
-            results.append(f"[!] Clickjacking vulnerability detected at {url}")
-    except requests.exceptions.RequestException as e:
-        results.append(f"[-] Error during Clickjacking test at {url}: {e}")
-    return results
-
-# CSRF vulnerability detect karne ka function
-def detect_csrf(url):
-    forms = get_all_forms(url)
-    results = []
-    for form in forms:
-        if not form.find("input", {"type": "hidden", "name": "csrf_token"}):
-            results.append(f"[!] CSRF vulnerability detected in form at {url}")
-    return results
-
-# Webpage se forms extract karne ka function
-def get_all_forms(url):
-    try:
-        r = requests.get(url, timeout=5)
-        soup = BeautifulSoup(r.content, "html.parser")
-        return soup.find_all("form")
-    except requests.exceptions.RequestException as e:
-        print(f"[-] Error during form extraction at {url}: {e}")
-        return []
-
-# Forms submit karke XSS vulnerabilities detect karne ka function
-def test_xss_in_forms(url):
-    forms = get_all_forms(url)
-    js_script = "<script>alert('XSS')</script>"
-    results = []
-    for form in forms:
-        action = form.attrs.get("action")
-        post_url = urljoin(url, action)
-        data = {}
-        for input_tag in form.find_all("input"):
-            input_name = input_tag.attrs.get("name")
-            input_type = input_tag.attrs.get("type", "text")
-            input_value = input_tag.attrs.get("value", "")
-            if input_type == "text":
-                input_value = js_script
-            data[input_name] = input_value
-
-        try:
-            response = requests.post(post_url, data=data, timeout=5)
-            if js_script in response.text:
-                results.append(f"[!] XSS vulnerability detected in form at {post_url}")
-        except requests.exceptions.RequestException as e:
-            results.append(f"[-] Error during form XSS test at {post_url}: {e}")
-    return results
-
-# Webpage se saare links extract karne ka function
-def extract_links(url, base_url):
-    try:
-        r = requests.get(url, timeout=5)
-        soup = BeautifulSoup(r.content, "html.parser")
-        links = set()
-        for a_tag in soup.find_all("a", href=True):
-            href = a_tag['href']
-            full_url = urljoin(base_url, href)
-            if urlparse(full_url).netloc == urlparse(base_url).netloc:  # Domain ke andar hi rahna hai
-                links.add(full_url)
-        return links
-    except requests.exceptions.RequestException as e:
-        print(f"[-] Error during link extraction at {url}: {e}")
-        return set()
-
-# Website ko crawl karna aur har page par scans perform karna
-def crawl_and_scan(base_url):
-    to_visit = set([base_url])
-    visited = set()
-    results = {
-        "sql_injection": [],
-        "xss": [],
-        "xss_in_forms": [],
-        "open_redirect": [],
-        "clickjacking": [],
-        "csrf": []
-    }
-
-    while to_visit:
-        url = to_visit.pop()
-        if url in visited:
-            continue
-        visited.add(url)
-        print(f"[+] Crawling and scanning {url}")
-
-        # Current page par scans perform karna
-        results["sql_injection"].extend(detect_sql_injection(url))
-        results["xss"].extend(detect_xss(url))
-        results["xss_in_forms"].extend(test_xss_in_forms(url))
-        results["open_redirect"].extend(detect_open_redirect(url))
-        results["clickjacking"].extend(detect_clickjacking(url))
-        results["csrf"].extend(detect_csrf(url))
-
-        # Links extract karna aur unhe pages visit karne ki list mein add karna
-        links = extract_links(url, base_url)
-        to_visit.update(links - visited)
-
-        # Server overload na ho, isliye requests ke darmiyan delay add karte hain
-        time.sleep(1)
-
-    return results
-
-# Network Tool: Port Scanning
-def port_scan(domain):
-    common_ports = [21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445, 993, 995, 1723, 3306, 3389, 5900, 8080]
+def scan_open_ports(domain, ports):
     open_ports = []
-    for port in common_ports:
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(1)
-            result = sock.connect_ex((domain, port))
+    for port in ports:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1)
+            result = s.connect_ex((domain, port))
             if result == 0:
                 open_ports.append(port)
-            sock.close()
-        except socket.error as e:
-            pass
     return open_ports
 
-@app.route('/')
+def check_xss(url):
+    xss_payloads = [
+        '<script>alert("XSS")</script>',
+        '"><img src="x" onerror="alert(\'XSS\')">',
+        '"><svg/onload=alert("XSS")>'
+    ]
+    for payload in xss_payloads:
+        try:
+            response = requests.get(url + payload)
+            if payload in response.text:
+                return True
+        except Exception as e:
+            print(f"Error checking XSS: {e}")
+    return False
+
+def check_phishing(url):
+    domain = get_domain_from_url(url)
+    
+    if domain in PHISHING_DOMAINS:
+        return True
+
+    phishing_keywords = ["login", "account", "verify", "update", "password"]
+    try:
+        response = requests.get(url)
+        content = response.text.lower()
+        if any(keyword in content for keyword in phishing_keywords):
+            return True
+    except Exception as e:
+        print(f"Error checking phishing: {e}")
+    
+    return False
+
+def simulate_ransomware(url):
+    ransom_notes = [
+        "Your files are encrypted!",
+        "Pay us to decrypt your files!",
+        "Ransom note: pay to get your data back!"
+    ]
+    try:
+        response = requests.get(url)
+        content = response.text.lower()
+        if any(note.lower() in content for note in ransom_notes):
+            return True
+    except Exception as e:
+        print(f"Error checking ransomware: {e}")
+    
+    return False
+
+def check_weak_passwords(url):
+    try:
+        response = requests.get(url)
+        content = response.text
+        for password in WEAK_PASSWORDS:
+            if re.search(rf'\b{re.escape(password)}\b', content):
+                return True
+    except Exception as e:
+        print(f"Error checking weak passwords: {e}")
+    return False
+
+def detect_dns_tunneling(domain):
+    try:
+        for length in range(30, 60, 5):
+            query = "A" * length + "." + domain
+            response = dns.resolver.resolve(query, 'A')
+            if response:
+                return True
+    except Exception as e:
+        print(f"Error checking DNS tunneling: {e}")
+    return False
+
+def check_session_hijacking(url):
+    try:
+        response = requests.get(url)
+        cookies = response.cookies
+        for cookie in cookies:
+            if not (cookie.secure and cookie.httpOnly):
+                return True
+        if re.search(r'session_id=[\w-]+', response.url):
+            return True
+    except Exception as e:
+        print(f"Error checking session hijacking: {e}")
+    return False
+
+def check_cryptojacking(url):
+    try:
+        response = requests.get(url)
+        content = response.text.lower()
+        mining_scripts = ["crypto", "miner", "coinhive", "jscoin", "webminer"]
+        if any(script in content for script in mining_scripts):
+            return True
+    except Exception as e:
+        print(f"Error checking cryptojacking: {e}")
+    return False
+
+def check_drive_by(url):
+    try:
+        response = requests.get(url)
+        content = response.text.lower()
+        malicious_patterns = [
+            "eval(", "document.write(", "innerHTML=", "setTimeout(", "setInterval(", "location.replace(", "iframe src="
+        ]
+        if any(pattern in content for pattern in malicious_patterns):
+            return True
+    except Exception as e:
+        print(f"Error checking drive-by attacks: {e}")
+    return False
+
+def check_malware(url):
+    try:
+        response = requests.get(url)
+        content = response.text.lower()
+        if any(signature in content for signature in MALWARE_SIGNATURES):
+            return True
+    except Exception as e:
+        print(f"Error checking malware: {e}")
+    return False
+
+def check_csrf(url):
+    try:
+        response = requests.get(url)
+        content = response.text
+        forms_without_tokens = re.findall(r'<form\b[^>]*>', content)
+        csrf_patterns = [
+            'csrf', 'token', 'security', 'xsrf'
+        ]
+        for form in forms_without_tokens:
+            if not any(pattern in form.lower() for pattern in csrf_patterns):
+                return True
+    except Exception as e:
+        print(f"Error checking CSRF: {e}")
+    return False
+
+def check_directory_traversal(url):
+    test_payloads = [
+        '/../etc/passwd', '/../../etc/passwd', '../admin/config.php', '/../../../../var/www/html/index.php'
+    ]
+    for payload in test_payloads:
+        try:
+            response = requests.get(url + payload)
+            if response.status_code == 200 and 'No such file' not in response.text:
+                return True
+        except Exception as e:
+            print(f"Error checking Directory Traversal: {e}")
+    return False
+
+def check_trojans(url):
+    try:
+        response = requests.get(url)
+        content = response.text.lower()
+        if any(indicator in content for indicator in TROJAN_INDICATORS):
+            return True
+    except Exception as e:
+        print(f"Error checking Trojans: {e}")
+    return False
+
+def check_spyware(url):
+    try:
+        response = requests.get(url)
+        content = response.text.lower()
+        if any(indicator in content for indicator in SPYWARE_INDICATORS):
+            return True
+    except Exception as e:
+        print(f"Error checking Spyware: {e}")
+    return False
+
+def check_code_injection(url):
+    try:
+        response = requests.get(url)
+        content = response.text.lower()
+        if any(pattern in content for pattern in CODE_INJECTION_PATTERNS):
+            return True
+    except Exception as e:
+        print(f"Error checking Code Injection: {e}")
+    return False
+
+def check_url_manipulation(url):
+    try:
+        response = requests.get(url)
+        content = response.text.lower()
+        if any(pattern in content for pattern in URL_MANIPULATION_PATTERNS):
+            return True
+    except Exception as e:
+        print(f"Error checking URL Manipulation: {e}")
+    return False
+
+def check_xxe(url):
+    try:
+        response = requests.post(url, data=XXE_PAYLOADS[0], headers={"Content-Type": "application/xml"})
+        if "error" in response.text.lower():
+            return True
+    except Exception as e:
+        print(f"Error checking XXE: {e}")
+    return False
+
+def get_detection_status(result):
+    return "Vulnerable" if result else "Not Vulnerable"
+
+def get_severity(result):
+    return "High" if result else "N/A"
+
+def get_recommendation(vulnerability):
+    recommendations = {
+        "Open Redirect": "Ensure that redirection is only allowed to trusted URLs.",
+        "Security Headers": "Implement missing security headers.",
+        "SQL Injection": "Sanitize and parameterize all user inputs.",
+        "Brute Force Login": "Implement account lockout mechanisms and CAPTCHAs.",
+        "Open Ports": "Close unused ports and use firewalls.",
+        "XSS": "Escape user input and validate data.",
+        "Phishing": "Verify domain legitimacy and educate users.",
+        "Ransomware": "Regularly back up data and use security software.",
+        "Weak Passwords": "Enforce strong password policies.",
+        "DNS Tunneling": "Monitor and restrict DNS queries.",
+        "Session Hijacking": "Use secure cookies and implement session management.",
+        "Cryptojacking": "Detect and remove mining scripts.",
+        "Drive-By Attack": "Use up-to-date security patches and scan for malicious scripts.",
+        "Malware": "Regularly scan for and remove malware.",
+        "CSRF": "Implement CSRF tokens in forms.",
+        "Directory Traversal": "Sanitize and validate file paths.",
+        "Trojans": "Use antivirus software and scan for malicious files.",
+        "Spyware": "Use security tools to detect and remove spyware.",
+        "Code Injection": "Validate and sanitize all inputs.",
+        "URL Manipulation": "Implement input validation and authorization checks.",
+        "XXE": "Disable XML external entity processing."
+    }
+    return recommendations.get(vulnerability, "No recommendation available.")
+
+def generate_pdf_report(results):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+
+    pdf.cell(200, 10, txt="Vulnerability Scan Report", ln=True, align='C')
+    pdf.ln(10)
+
+    # Table header
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(30, 10, 'Vulnerability', 1)
+    pdf.cell(30, 10, 'Status', 1)
+    pdf.cell(30, 10, 'Severity', 1)
+    pdf.cell(0, 10, 'Recommendation', 1, ln=True)
+
+    # Table content
+    pdf.set_font("Arial", size=10)
+    for section, (status, severity, recommendation) in results.items():
+        pdf.cell(30, 5, section, 1)
+        pdf.cell(30, 5, status, 1)
+        pdf.cell(30, 5, severity, 1)
+        pdf.cell(0, 5, recommendation, 1)
+        pdf.ln()
+
+    pdf_file = "vulnerability_report.pdf"
+    pdf.output(pdf_file)
+    return pdf_file
+
+@app.route('/', methods=['GET', 'POST'])
 def index():
-    return render_template_string('''
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Web Cyber Trap</title>
-        <link href="https://maxcdn.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css" rel="stylesheet">
-        <style>
-            body {
-                font-family: Arial, sans-serif;
-                background-color: #f8f9fa;
-                margin: 0;
-                padding: 20px;
-            }
-            .container {
-                max-width: 900px;
-                margin: 0 auto;
-                background-color: #fff;
-                padding: 20px;
-                border-radius: 8px;
-                box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
-            }
-            h1, h2, h3 {
-                text-align: center;
-            }
-            form {
-                display: flex;
-                flex-direction: column;
-            }
-            label, input, button {
-                margin-bottom: 10px;
-            }
-            input, button {
-                padding: 10px;
-                font-size: 16px;
-            }
-            button {
-                background-color: #007bff;
-                color: #fff;
-                border: none;
-                border-radius: 4px;
-                cursor: pointer;
-            }
-            button:hover {
-                background-color: #0056b3;
-            }
-            #results {
-                margin-top: 20px;
-            }
-            .result-category {
-                margin-top: 20px;
-            }
-            .result-item {
-                margin-bottom: 10px;
-                padding: 10px;
-                border: 1px solid #e0e0e0;
-                border-radius: 4px;
-            }
-            .alert {
-                margin-top: 20px;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>Web Cyber Trap</h1>
-            <h3>Students: Wasal Hassan, Umar Shah Khan</h3>
-            <h3>Supervisor: Sir Naqi Abbas</h3>
-            <form id="scan-form">
-                <label for="url">Enter URL to Scan:</label>
-                <input type="text" id="url" name="url" required>
-                <button type="submit" class="btn btn-primary">Scan</button>
-            </form>
-            <div id="results">
-                <h2>Scan Results</h2>
-                <div class="result-category" id="sql-results">
-                    <h3>SQL Injection</h3>
-                </div>
-                <div class="result-category" id="xss-results">
-                    <h3>XSS</h3>
-                </div>
-                <div class="result-category" id="form-xss-results">
-                    <h3>Form XSS</h3>
-                </div>
-                <div class="result-category" id="open-redirect-results">
-                    <h3>Open Redirect</h3>
-                </div>
-                <div class="result-category" id="clickjacking-results">
-                    <h3>Clickjacking</h3>
-                </div>
-                <div class="result-category" id="csrf-results">
-                    <h3>CSRF</h3>
-                </div>
-                <div class="result-category" id="port-scan-results">
-                    <h3>Port Scan</h3>
-                </div>
-            </div>
-        </div>
-        <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
-        <script src="https://maxcdn.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
-        <script>
-            document.getElementById('scan-form').addEventListener('submit', function(e) {
-                e.preventDefault();
-                const url = document.getElementById('url').value;
-                const sqlResultsContainer = document.getElementById('sql-results');
-                const xssResultsContainer = document.getElementById('xss-results');
-                const formXssResultsContainer = document.getElementById('form-xss-results');
-                const openRedirectResultsContainer = document.getElementById('open-redirect-results');
-                const clickjackingResultsContainer = document.getElementById('clickjacking-results');
-                const csrfResultsContainer = document.getElementById('csrf-results');
-                const portScanResultsContainer = document.getElementById('port-scan-results');
+    if request.method == 'POST':
+        url = request.form['url']
 
-                sqlResultsContainer.innerHTML = '<h3>SQL Injection</h3>';
-                xssResultsContainer.innerHTML = '<h3>XSS</h3>';
-                formXssResultsContainer.innerHTML = '<h3>Form XSS</h3>';
-                openRedirectResultsContainer.innerHTML = '<h3>Open Redirect</h3>';
-                clickjackingResultsContainer.innerHTML = '<h3>Clickjacking</h3>';
-                csrfResultsContainer.innerHTML = '<h3>CSRF</h3>';
-                portScanResultsContainer.innerHTML = '<h3>Port Scan</h3>';
+        results = {
+            "Open Redirect": (check_open_redirect(url), get_severity(check_open_redirect(url)), get_recommendation("Open Redirect")),
+            "Security Headers": (check_security_headers(url), get_severity(check_security_headers(url)), get_recommendation("Security Headers")),
+            "SQL Injection": (check_sql_injection(url), get_severity(check_sql_injection(url)), get_recommendation("SQL Injection")),
+            "Brute Force Login": (brute_force_login(url, ["admin", "user"], ["password", "123456"])[0], get_severity(brute_force_login(url, ["admin", "user"], ["password", "123456"])[0]), get_recommendation("Brute Force Login")),
+            "Open Ports": (scan_open_ports(get_domain_from_url(url), [22, 80, 443, 8080]), get_severity(scan_open_ports(get_domain_from_url(url), [22, 80, 443, 8080])), get_recommendation("Open Ports")),
+            "XSS": (check_xss(url), get_severity(check_xss(url)), get_recommendation("XSS")),
+            "Phishing": (check_phishing(url), get_severity(check_phishing(url)), get_recommendation("Phishing")),
+            "Ransomware": (simulate_ransomware(url), get_severity(simulate_ransomware(url)), get_recommendation("Ransomware")),
+            "Weak Passwords": (check_weak_passwords(url), get_severity(check_weak_passwords(url)), get_recommendation("Weak Passwords")),
+            "DNS Tunneling": (detect_dns_tunneling(get_domain_from_url(url)), get_severity(detect_dns_tunneling(get_domain_from_url(url))), get_recommendation("DNS Tunneling")),
+            "Session Hijacking": (check_session_hijacking(url), get_severity(check_session_hijacking(url)), get_recommendation("Session Hijacking")),
+            "Cryptojacking": (check_cryptojacking(url), get_severity(check_cryptojacking(url)), get_recommendation("Cryptojacking")),
+            "Drive-By Attack": (check_drive_by(url), get_severity(check_drive_by(url)), get_recommendation("Drive-By Attack")),
+            "Malware": (check_malware(url), get_severity(check_malware(url)), get_recommendation("Malware")),
+            "CSRF": (check_csrf(url), get_severity(check_csrf(url)), get_recommendation("CSRF")),
+            "Directory Traversal": (check_directory_traversal(url), get_severity(check_directory_traversal(url)), get_recommendation("Directory Traversal")),
+            "Trojans": (check_trojans(url), get_severity(check_trojans(url)), get_recommendation("Trojans")),
+            "Spyware": (check_spyware(url), get_severity(check_spyware(url)), get_recommendation("Spyware")),
+            "Code Injection": (check_code_injection(url), get_severity(check_code_injection(url)), get_recommendation("Code Injection")),
+            "URL Manipulation": (check_url_manipulation(url), get_severity(check_url_manipulation(url)), get_recommendation("URL Manipulation")),
+            "XXE": (check_xxe(url), get_severity(check_xxe(url)), get_recommendation("XXE"))
+        }
 
-                fetch('/scan', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ url: url })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.error) {
-                        sqlResultsContainer.innerHTML += `<div class="alert alert-danger">${data.error}</div>`;
-                        return;
-                    }
-                    const sqlResults = data.sql_injection;
-                    const xssResults = data.xss;
-                    const formXssResults = data.xss_in_forms;
-                    const openRedirectResults = data.open_redirect;
-                    const clickjackingResults = data.clickjacking;
-                    const csrfResults = data.csrf;
+        results_text = {
+            key: (
+                get_detection_status(value[0]),
+                value[1] if value[0] else "N/A",
+                value[2] if value[0] else "N/A"
+            )
+            for key, value in results.items()
+        }
 
-                    if (sqlResults.length > 0) {
-                        sqlResults.forEach(result => {
-                            const div = document.createElement('div');
-                            div.classList.add('result-item');
-                            div.textContent = result;
-                            sqlResultsContainer.appendChild(div);
-                        });
-                    } else {
-                        const div = document.createElement('div');
-                        div.classList.add('result-item');
-                        div.textContent = '[+] No SQL Injection vulnerability detected.';
-                        sqlResultsContainer.appendChild(div);
-                    }
+        pdf_file = generate_pdf_report(results_text)
 
-                    if (xssResults.length > 0) {
-                        xssResults.forEach(result => {
-                            const div = document.createElement('div');
-                            div.classList.add('result-item');
-                            div.textContent = result;
-                            xssResultsContainer.appendChild(div);
-                        });
-                    } else {
-                        const div = document.createElement('div');
-                        div.classList.add('result-item');
-                        div.textContent = '[+] No XSS vulnerability detected.';
-                        xssResultsContainer.appendChild(div);
-                    }
+        return render_template('results.html', results=results_text, pdf_file=pdf_file)
 
-                    if (formXssResults.length > 0) {
-                        formXssResults.forEach(result => {
-                            const div = document.createElement('div');
-                            div.classList.add('result-item');
-                            div.textContent = result;
-                            formXssResultsContainer.appendChild(div);
-                        });
-                    } else {
-                        const div = document.createElement('div');
-                        div.classList.add('result-item');
-                        div.textContent = '[+] No XSS vulnerability detected in forms.';
-                        formXssResultsContainer.appendChild(div);
-                    }
+    return render_template('index.html')
 
-                    if (openRedirectResults.length > 0) {
-                        openRedirectResults.forEach(result => {
-                            const div = document.createElement('div');
-                            div.classList.add('result-item');
-                            div.textContent = result;
-                            openRedirectResultsContainer.appendChild(div);
-                        });
-                    } else {
-                        const div = document.createElement('div');
-                        div.classList.add('result-item');
-                        div.textContent = '[+] No Open Redirect vulnerability detected.';
-                        openRedirectResultsContainer.appendChild(div);
-                    }
+@app.route('/download/<filename>')
+def download_file(filename):
+    return send_file(filename, as_attachment=True)
 
-                    if (clickjackingResults.length > 0) {
-                        clickjackingResults.forEach(result => {
-                            const div = document.createElement('div');
-                            div.classList.add('result-item');
-                            div.textContent = result;
-                            clickjackingResultsContainer.appendChild(div);
-                        });
-                    } else {
-                        const div = document.createElement('div');
-                        div.classList.add('result-item');
-                        div.textContent = '[+] No Clickjacking vulnerability detected.';
-                        clickjackingResultsContainer.appendChild(div);
-                    }
-
-                    if (csrfResults.length > 0) {
-                        csrfResults.forEach(result => {
-                            const div = document.createElement('div');
-                            div.classList.add('result-item');
-                            div.textContent = result;
-                            csrfResultsContainer.appendChild(div);
-                        });
-                    } else {
-                        const div = document.createElement('div');
-                        div.classList.add('result-item');
-                        div.textContent = '[+] No CSRF vulnerability detected.';
-                        csrfResultsContainer.appendChild(div);
-                    }
-
-                    // Network Tools Results
-                    const domain = new URL(url).hostname;
-                    fetch('/network_tools', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({ domain: domain })
-                    })
-                    .then(response => response.json())
-                    .then(networkData => {
-                        const openPorts = networkData.open_ports;
-
-                        if (openPorts.length > 0) {
-                            openPorts.forEach(port => {
-                                const div = document.createElement('div');
-                                div.classList.add('result-item');
-                                div.textContent = `Open port: ${port}`;
-                                portScanResultsContainer.appendChild(div);
-                            });
-                        } else {
-                            const div = document.createElement('div');
-                            div.classList.add('result-item');
-                            div.textContent = '[+] No open ports detected.';
-                            portScanResultsContainer.appendChild(div);
-                        }
-                    })
-                    .catch(error => console.error('Error:', error));
-                })
-                .catch(error => console.error('Error:', error));
-            });
-        </script>
-    </body>
-    </html>
-    ''')
-
-# Scan request handle karne ka route
-@app.route('/scan', methods=['POST'])
-def scan():
-    data = request.get_json()
-    url = validate_url(data['url'])
-    if not url:
-        return jsonify({"error": "Invalid or unreachable URL"}), 400
-    results = crawl_and_scan(url)
-    return jsonify(results)
-
-# Network tools request handle karne ka route
-@app.route('/network_tools', methods=['POST'])
-def network_tools():
-    data = request.get_json()
-    domain = data['domain']
-    open_ports = port_scan(domain)
-    return jsonify({"open_ports": open_ports})
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     app.run(debug=True)
